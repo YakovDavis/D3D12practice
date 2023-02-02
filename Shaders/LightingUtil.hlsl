@@ -6,6 +6,8 @@
 
 #define MaxLights 16
 
+static const float PI = 3.14159265f;
+
 struct Light
 {
     float3 Strength;
@@ -18,44 +20,76 @@ struct Light
 
 struct Material
 {
-    float4 DiffuseAlbedo;
-    float3 FresnelR0;
-    float Shininess;
+    float4 Albedo;
+    float Metallic;
+    float Roughness;
+    float AO;
 };
 
-float CalcAttenuation(float d, float falloffStart, float falloffEnd)
+float3 SchlickFresnel(float cosTheta, float3 F0)
 {
-    // Linear falloff.
-    return saturate((falloffEnd-d) / (falloffEnd - falloffStart));
+    return F0 + (1.0f - F0) * pow(clamp(1.0f - cosTheta, 0.0f, 1.0f), 5.0f);
 }
 
-// Schlick gives an approximation to Fresnel reflectance (see pg. 233 "Real-Time Rendering 3rd Ed.").
-// R0 = ( (n-1)/(n+1) )^2, where n is the index of refraction.
-float3 SchlickFresnel(float3 R0, float3 normal, float3 lightVec)
+float DistributionGGX(float3 N, float3 H, float roughness)
 {
-    float cosIncidentAngle = saturate(dot(normal, lightVec));
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH = max(dot(N, H), 0.0);
+    float NdotH2 = NdotH * NdotH;
 
-    float f0 = 1.0f - cosIncidentAngle;
-    float3 reflectPercent = R0 + (1.0f - R0)*(f0*f0*f0*f0*f0);
+    float num = a2;
+    float denom = (NdotH2 * (a2 - 1.0) + 1.0);
+    denom = PI * denom * denom;
 
-    return reflectPercent;
+    return num / denom;
 }
 
-float3 BlinnPhong(float3 lightStrength, float3 lightVec, float3 normal, float3 toEye, Material mat)
+float GeometrySchlickGGX(float NdotV, float roughness)
 {
-    const float m = mat.Shininess * 256.0f;
+    float r = (roughness + 1.0);
+    float k = (r * r) / 8.0;
+
+    float num = NdotV;
+    float denom = NdotV * (1.0 - k) + k;
+
+    return num / denom;
+}
+float GeometrySmith(float3 N, float3 V, float3 L, float roughness)
+{
+    float NdotV = max(dot(N, V), 0.0);
+    float NdotL = max(dot(N, L), 0.0);
+    float ggx2 = GeometrySchlickGGX(NdotV, roughness);
+    float ggx1 = GeometrySchlickGGX(NdotL, roughness);
+
+    return ggx1 * ggx2;
+}
+
+
+float3 CookTorrance(float3 lightStrength, float3 lightVec, float3 normal, float3 toEye, Material mat)
+{
     float3 halfVec = normalize(toEye + lightVec);
 
-    float roughnessFactor = (m + 8.0f)*pow(max(dot(halfVec, normal), 0.0f), m) / 8.0f;
-    float3 fresnelFactor = SchlickFresnel(mat.FresnelR0, halfVec, lightVec);
+    float distance = length(lightVec);
+    float attenuation = 1.0f / (distance * distance);
+    float3 radiance = lightStrength * attenuation;
 
-    float3 specAlbedo = fresnelFactor*roughnessFactor;
+    float3 F0 = 0.04f;
+    F0 = lerp(F0, mat.Albedo, mat.Metallic);
 
-    // Our spec formula goes outside [0,1] range, but we are 
-    // doing LDR rendering.  So scale it down a bit.
-    specAlbedo = specAlbedo / (specAlbedo + 1.0f);
+    float NDF = DistributionGGX(normal, halfVec, mat.Roughness);
+    float G = GeometrySmith(normal, toEye, lightVec, mat.Roughness);
+    float3 F = SchlickFresnel(max(dot(halfVec, toEye), 0.0f), F0);
 
-    return (mat.DiffuseAlbedo.rgb + specAlbedo) * lightStrength;
+    float3 kS = F;
+    float3 kD = ((float3)1.0f) - kS;
+    kD *= 1.0f - mat.Metallic;
+
+    float3 numerator = NDF * G * F;
+    float denominator = 4.0f * max(dot(normal, toEye), 0.0f) * max(dot(normal, lightVec), 0.0f) + 0.0001f;
+    float3 specular = numerator / denominator;
+
+    return (kD * mat.Albedo.rgb / PI + specular) * radiance;
 }
 
 //---------------------------------------------------------------------------------------
@@ -70,7 +104,7 @@ float3 ComputeDirectionalLight(Light L, Material mat, float3 normal, float3 toEy
     float ndotl = max(dot(lightVec, normal), 0.0f);
     float3 lightStrength = L.Strength * ndotl;
 
-    return BlinnPhong(lightStrength, lightVec, normal, toEye, mat);
+    return CookTorrance(lightStrength, lightVec, normal, toEye, mat);
 }
 
 //---------------------------------------------------------------------------------------
@@ -95,11 +129,7 @@ float3 ComputePointLight(Light L, Material mat, float3 pos, float3 normal, float
     float ndotl = max(dot(lightVec, normal), 0.0f);
     float3 lightStrength = L.Strength * ndotl;
 
-    // Attenuate light by distance.
-    float att = CalcAttenuation(d, L.FalloffStart, L.FalloffEnd);
-    lightStrength *= att;
-
-    return BlinnPhong(lightStrength, lightVec, normal, toEye, mat);
+    return CookTorrance(lightStrength, lightVec, normal, toEye, mat);
 }
 
 //---------------------------------------------------------------------------------------
@@ -124,15 +154,11 @@ float3 ComputeSpotLight(Light L, Material mat, float3 pos, float3 normal, float3
     float ndotl = max(dot(lightVec, normal), 0.0f);
     float3 lightStrength = L.Strength * ndotl;
 
-    // Attenuate light by distance.
-    float att = CalcAttenuation(d, L.FalloffStart, L.FalloffEnd);
-    lightStrength *= att;
-
     // Scale by spotlight
     float spotFactor = pow(max(dot(-lightVec, L.Direction), 0.0f), L.SpotPower);
     lightStrength *= spotFactor;
 
-    return BlinnPhong(lightStrength, lightVec, normal, toEye, mat);
+    return CookTorrance(lightStrength, lightVec, normal, toEye, mat);
 }
 
 float4 ComputeLighting(Light gLights[MaxLights], Material mat,

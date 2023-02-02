@@ -113,7 +113,7 @@ float4 PS(VertexOut pin) : SV_Target
     shadowFactor[0] = CalcShadowFactor(pin.ShadowPosH);
 
     const float shininess = (1.0f - roughness) * normalMapSample.a;
-    Material mat = { diffuseAlbedo, fresnelR0, shininess };
+    Material mat = { diffuseAlbedo, 0.0f, roughness, 0.0f };
     float4 directLight = ComputeLighting(gLights, mat, pin.PosW,
         bumpedNormalW, toEyeW, shadowFactor);
 
@@ -122,8 +122,7 @@ float4 PS(VertexOut pin) : SV_Target
     // Add in specular reflections.
     float3 r = reflect(-toEyeW, bumpedNormalW);
     float4 reflectionColor = gCubeMap.Sample(gsamLinearWrap, r);
-    float3 fresnelFactor = SchlickFresnel(fresnelR0, bumpedNormalW, r);
-    litColor.rgb += shininess * fresnelFactor * reflectionColor.rgb;
+    litColor.rgb += shininess * reflectionColor.rgb;
 
     // Common convention to take alpha from diffuse albedo.
     litColor.a = diffuseAlbedo.a;
